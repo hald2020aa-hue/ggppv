@@ -1,0 +1,6 @@
+{
+  "name": "Manga Reader",
+  "description": "تطبيق احترافي متعدد المصادر لقراءة المانهوا والمانجا باللغة العربية مع دعم إدارة المواقع، المتصفح المدمج، التنزيل المحلي، والقراءة دون اتصال.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

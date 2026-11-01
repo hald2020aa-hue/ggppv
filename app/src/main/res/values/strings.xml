@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">Manga Reader</string>
+    <string name="drawer_login_prompt">انقر هنا لتسجيل الدخول</string>
+    <string name="nav_storage">التخزين</string>
+    <string name="nav_recommendations">التوصيات</string>
+    <string name="nav_updates">التحديثات</string>
+    <string name="nav_favorites">المفضلة</string>
+    <string name="nav_history">السجل</string>
+    <string name="nav_manage_sources">إدارة المواقع</string>
+    <string name="nav_added_sources">المواقع المضافة</string>
+    <string name="nav_settings">الاعدادات</string>
+    <string name="nav_browser">المتصفح</string>
+    <string name="nav_downloads">التنزيلات</string>
+    <string name="action_continue">متابعة</string>
+    <string name="action_import">استيراد</string>
+    <string name="action_add_site">إضافة موقع</string>
+    <string name="action_add">إضافة</string>
+    <string name="action_cancel">إلغاء</string>
+    <string name="action_confirm">تأكيد</string>
+    <string name="action_retry">إعادة المحاولة</string>
+    <string name="empty_storage_message">لم تحفظ اي عمل في التخزين.</string>
+    <string name="empty_sources_message">لم تضف أي مواقع بعد</string>
+    <string name="empty_favorites_message">المفضلة فارغة.</string>
+    <string name="empty_history_message">السجل فارغ.</string>
+    <string name="domain_privacy_notice">للتحقق من التوافق، يُرسل اسم نطاق الموقع فقط. لا يُرسل مسار الرابط أو محتوى الصفحة أو ملفات الارتباط.</string>
+</resources>

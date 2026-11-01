@@ -1,0 +1,147 @@
+name: Android CI & Build Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Configure Preinstalled Android SDK & Licenses
+        run: |
+          SDK_DIR="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> $GITHUB_ENV
+          sudo mkdir -p "$SDK_DIR/licenses"
+          sudo chmod -R 777 "$SDK_DIR"
+          printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$SDK_DIR/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b84351f2910\n" > "$SDK_DIR/licenses/android-sdk-preview-license"
+          printf "\n601085b94cd77f0b54ff86406957099ebe79c4d6\n" > "$SDK_DIR/licenses/android-googletv-license"
+          printf "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" > "$SDK_DIR/licenses/google-gdk-license"
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          validate-wrappers: false
+
+      - name: Prepare Binary Assets, Font & Debug Keystore
+        run: |
+          # 1. Generate Gradle Wrapper files if missing from text-only push
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --no-daemon
+          fi
+          chmod +x ./gradlew
+
+          # 2. Ensure .env exists from .env.example for Secrets Gradle Plugin
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+          # 3. Ensure Cairo font exists (in case binary .ttf was skipped during push)
+          mkdir -p app/src/main/res/font
+          if [ ! -s app/src/main/res/font/cairo.ttf ]; then
+            curl -f -L -s "https://fonts.gstatic.com/s/cairo/v31/SLXgc1nY6HkvangtZmpQdkhzfH5lkSs2SgRjCAGMQ1z0hOA-a1PiKQ.ttf" -o app/src/main/res/font/cairo.ttf
+          fi
+
+          # 4. Ensure valid PNG launcher icons exist in mipmap folders (pure Python3, zero external tools needed)
+          python3 - << 'EOF'
+          import os, struct, zlib, math
+
+          def write_png(path, size, circular=False):
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              raw = bytearray()
+              cx = cy = (size - 1) / 2.0
+              r_max = size / 2.0
+              for y in range(size):
+                  raw.append(0)
+                  for x in range(size):
+                      if circular and math.hypot(x - cx, y - cy) > r_max:
+                          raw.extend((0, 0, 0, 0))
+                      else:
+                          # Indigo gradient background (#1E1B4B -> #312E81) with centered book accent
+                          nx, ny = x / size, y / size
+                          if 0.28 <= nx <= 0.72 and 0.22 <= ny <= 0.78:
+                              raw.extend((165, 180, 252, 255))
+                          else:
+                              raw.extend((30 + int(19 * ny), 27 + int(19 * ny), 75 + int(54 * ny), 255))
+              def chunk(tag, data):
+                  return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
+              ihdr = struct.pack("!IIBBBBB", size, size, 8, 6, 0, 0, 0)
+              png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
+              with open(path, "wb") as f:
+                  f.write(png)
+
+          densities = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+          for d, sz in densities.items():
+              folder = f"app/src/main/res/mipmap-{d}"
+              os.makedirs(folder, exist_ok=True)
+              for webp in ("ic_launcher.webp", "ic_launcher_round.webp"):
+                  wp = os.path.join(folder, webp)
+                  if os.path.exists(wp):
+                      os.remove(wp)
+              p1 = os.path.join(folder, "ic_launcher.png")
+              p2 = os.path.join(folder, "ic_launcher_round.png")
+              if not os.path.exists(p1) or os.path.getsize(p1) < 64:
+                  write_png(p1, sz, circular=False)
+              if not os.path.exists(p2) or os.path.getsize(p2) < 64:
+                  write_png(p2, sz, circular=True)
+          EOF
+
+          # 5. Generate standard Android debug.keystore required by app/build.gradle.kts
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Run Unit Tests (required)
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK Output Exists
+        run: ls -lh app/build/outputs/apk/debug/*.apk
+
+      - name: Upload Debug APK Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MangaReader-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
