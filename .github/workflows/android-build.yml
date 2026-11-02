@@ -66,7 +66,7 @@ jobs:
               txt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.11.1-bin.zip", txt)
               wrapper_props.write_text(txt, encoding="utf-8")
 
-          # 2. Normalize settings.gradle.kts foojay plugin version & repositories for public Maven
+          # 2. Normalize settings.gradle.kts foojay plugin version for public Gradle Plugin Portal
           settings_path = pathlib.Path("settings.gradle.kts")
           if settings_path.exists():
               st = settings_path.read_text(encoding="utf-8")
@@ -160,27 +160,27 @@ jobs:
               '  "ksp"(libs.moshi.kotlin.codegen)',
               '  // "ksp"(libs.moshi.kotlin.codegen)'
           )
-          ag = ag.replace(
-              "testOptions { unitTests { isIncludeAndroidResources = true } }",
-              """testOptions {
-    unitTests {
-      isIncludeAndroidResources = true
-      isReturnDefaultValues = true
-      all {
-        it.jvmArgs(
-          "-Xmx2g",
-          "--add-opens=java.base/java.lang=ALL-UNNAMED",
-          "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
-          "--add-opens=java.base/java.io=ALL-UNNAMED",
-          "--add-opens=java.base/java.net=ALL-UNNAMED",
-          "--add-opens=java.base/java.util=ALL-UNNAMED",
-          "--add-opens=java.base/java.text=ALL-UNNAMED",
-          "--add-opens=java.base/java.security=ALL-UNNAMED"
-        )
-      }
-    }
-  }"""
+          test_opts = (
+              "testOptions {\n"
+              "    unitTests {\n"
+              "      isIncludeAndroidResources = true\n"
+              "      isReturnDefaultValues = true\n"
+              "      all {\n"
+              "        it.jvmArgs(\n"
+              "          \"-Xmx2g\",\n"
+              "          \"--add-opens=java.base/java.lang=ALL-UNNAMED\",\n"
+              "          \"--add-opens=java.base/java.lang.reflect=ALL-UNNAMED\",\n"
+              "          \"--add-opens=java.base/java.io=ALL-UNNAMED\",\n"
+              "          \"--add-opens=java.base/java.net=ALL-UNNAMED\",\n"
+              "          \"--add-opens=java.base/java.util=ALL-UNNAMED\",\n"
+              "          \"--add-opens=java.base/java.text=ALL-UNNAMED\",\n"
+              "          \"--add-opens=java.base/java.security=ALL-UNNAMED\"\n"
+              "        )\n"
+              "      }\n"
+              "    }\n"
+              "  }"
           )
+          ag = ag.replace("testOptions { unitTests { isIncludeAndroidResources = true } }", test_opts)
           app_gradle.write_text(ag, encoding="utf-8")
 
           # 6. Normalize Robolectric @Config(sdk = [35]) to @Config(sdk = [34]) for Robolectric 4.14.1 on CI
