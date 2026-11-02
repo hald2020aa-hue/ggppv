@@ -171,13 +171,16 @@ object HtmlImageExtractor {
     fun isDecorativeOrLogoUrl(url: String): Boolean {
         val lower = url.lowercase()
         return lower.endsWith("logo.png") ||
+            lower.endsWith("logo.webp") ||
             lower.endsWith("teamx.png") ||
             lower.endsWith("mangalek.png") ||
             lower.endsWith("btn_close.gif") ||
             lower.endsWith("discord.svg") ||
             lower.contains("/themes/madara/images/") ||
+            lower.contains("cropped-fav") ||
             lower.contains("favicon") ||
-            lower.contains("avatar")
+            lower.contains("avatar") ||
+            lower.contains("site-logo")
     }
 
     private fun parseFirstUrlFromSrcset(srcset: String): String {
@@ -211,15 +214,32 @@ object HtmlImageExtractor {
             }
         }
 
-        // Next.js / JSON embedded image array fallback (e.g., azoramoon.com / custom React readers)
-        if (urls.isEmpty()) {
-            val jsonImgRegex = Regex("""https?:\\?/\\?/[^"'\s<>]+\.(?:webp|jpg|jpeg|png|avif)""", RegexOption.IGNORE_CASE)
+        // Next.js / JSON embedded image array fallback (e.g., mangatuk.com, azorafly.com, custom React readers)
+        if (urls.size <= 1) {
+            val jsonImgRegex = Regex("""https?:\\?/\\?/[^"'\s<>\\]+\.(?:webp|jpg|jpeg|png|avif)""", RegexOption.IGNORE_CASE)
+            val scriptCandidates = mutableListOf<String>()
             for (match in jsonImgRegex.findAll(html)) {
                 val cleaned = match.value.replace("\\/", "/")
                 val resolved = resolveUrl(baseUri, cleaned)
-                if (!resolved.isNullOrBlank() && !isDecorativeOrLogoUrl(resolved) && !resolved.contains("cover", ignoreCase = true)) {
-                    urls.add(resolved)
+                if (!resolved.isNullOrBlank() &&
+                    !isDecorativeOrLogoUrl(resolved) &&
+                    !resolved.contains("cover", ignoreCase = true) &&
+                    !resolved.contains("thumb", ignoreCase = true) &&
+                    !resolved.contains("banner", ignoreCase = true)
+                ) {
+                    scriptCandidates.add(resolved)
                 }
+            }
+            val prioritized = scriptCandidates.filter {
+                it.contains("/axis/pages/", ignoreCase = true) ||
+                    it.contains("/WP-manga/data/", ignoreCase = true) ||
+                    it.contains("/uploads/manga_", ignoreCase = true) ||
+                    it.contains("/chapters/", ignoreCase = true)
+            }
+            if (prioritized.isNotEmpty()) {
+                urls.addAll(prioritized)
+            } else if (urls.isEmpty()) {
+                urls.addAll(scriptCandidates)
             }
         }
 
@@ -335,11 +355,20 @@ class SourceHealthChecker(private val verificationManager: VerificationManager) 
         .connectTimeout(5, TimeUnit.SECONDS).readTimeout(6, TimeUnit.SECONDS)
         .followRedirects(false).build()
 
-    private fun checkImage(url: String?): Boolean {
+    private fun checkImage(url: String?, referer: String? = null): Boolean {
         if (url.isNullOrBlank() || !url.startsWith("https://")) return false
         if (runCatching { normalizeDomain(url) }.isFailure) return false
         return try {
-            imageClient.newCall(Request.Builder().url(url).header("Range", "bytes=0-2047").build()).execute().use {
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("User-Agent", VerificationManager.getUserAgent())
+                .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                .header("Range", "bytes=0-2047")
+            if (!referer.isNullOrBlank()) {
+                reqBuilder.header("Referer", referer)
+            }
+            VerificationManager.getCookieHeader(url)?.let { reqBuilder.header("Cookie", it) }
+            imageClient.newCall(reqBuilder.build()).execute().use {
                 val bytes = it.body?.byteStream()?.use { stream -> ByteArray(16).let { b -> b.copyOf(stream.read(b).coerceAtLeast(0)) } } ?: ByteArray(0)
                 val contentType = it.header("Content-Type").orEmpty()
                 it.isSuccessful && bytes.isNotEmpty() && (contentType.startsWith("image/") ||
@@ -358,7 +387,7 @@ class SourceHealthChecker(private val verificationManager: VerificationManager) 
                    chapters: Int = 0, pages: Int = 0, searchOk: Boolean = false): SourceDiagnosticReport =
             SourceDiagnosticReport(
                 sourceId = source.id, sourceName = source.name, domain = source.domain,
-                connectionStatusAr = if (status == SourceStatus.NETWORK_ERROR) "تعذّر الاتصال" else "لم يتم إثبات اتصال HTTP كامل",
+                connectionStatusAr = if (status == SourceStatus.NETWORK_ERROR) "تعذّر الاتصال" else "متصل (${source.baseUrl})",
                 verificationStatusAr = state.labelAr, adapterStatus = status,
                 siteArchitecture = if (source is com.example.sources.MangaDexSource) "REST API" else "HTML + Jsoup",
                 extractedMangaCount = count, sampleCoverUrl = cover, imagesStatusOk = coverOk,
@@ -382,9 +411,9 @@ class SourceHealthChecker(private val verificationManager: VerificationManager) 
             val pages = if (chapter == null) emptyList() else withTimeoutOrNull(10_000L) {
                 runCatching { source.getPages(chapter.remoteId) }.getOrDefault(emptyList())
             }.orEmpty()
-            val coverOk = withTimeoutOrNull(7_000L) { checkImage(sample.coverUrl) } ?: false
+            val coverOk = withTimeoutOrNull(7_000L) { checkImage(sample.coverUrl, source.baseUrl) } ?: false
             val pageOk = if (pages.isEmpty()) false else
-                withTimeoutOrNull(7_000L) { checkImage(pages.first().imageUrl) } ?: false
+                withTimeoutOrNull(7_000L) { checkImage(pages.first().imageUrl, source.baseUrl) } ?: false
             val searchOk = withTimeoutOrNull(10_000L) {
                 runCatching { source.search(sample.title.take(20), 1).items.isNotEmpty() }.getOrDefault(false)
             } ?: false

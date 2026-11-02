@@ -12,6 +12,9 @@ import com.example.domain.models.SourceDiagnosticReport
 import com.example.domain.models.SourceStatus
 import com.example.sources.ConfigurableHtmlMangaSource
 import com.example.sources.DynamicSiteSource
+import com.example.sources.cleanExtractedMangaTitle
+import com.example.sources.parseNormalizedMangaStatus
+import com.example.sources.parseRatingFromDoc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -125,8 +128,16 @@ class DynamicSourceAdapter(val configuration: SourceConfiguration) : Configurabl
         require(url.startsWith("https://") && isSafeRedirectDestination(configuration.domain, url)) {
             "Only same-site HTTPS URLs are allowed for dynamic source extraction"
         }
-        val request = Request.Builder().url(url).header("Accept", "text/html").build()
-        httpClient.newBuilder().followRedirects(false).build().newCall(request).execute().use { result ->
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .header("User-Agent", VerificationManager.getUserAgent())
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "ar,en-US;q=0.9,en;q=0.8")
+            .header("Referer", "https://${configuration.domain}/")
+        VerificationManager.getCookieHeader(url)?.let { cookie ->
+            reqBuilder.header("Cookie", cookie)
+        }
+        httpClient.newBuilder().followRedirects(false).build().newCall(reqBuilder.build()).execute().use { result ->
             if (result.isRedirect) throw IllegalStateException("Redirect requires explicit review")
             val body = result.body?.string().orEmpty()
             val challenge = detectSecurityChallenge(body, result.code, result.headers.toMap())
@@ -158,17 +169,27 @@ class DynamicSourceAdapter(val configuration: SourceConfiguration) : Configurabl
     }
 
     override suspend fun getDetails(mangaUrl: String): MangaDetails = withContext(Dispatchers.IO) {
-        parseDetails(readAllowedHtml(mangaUrl), mangaUrl)
+        val resolvedUrl = resolveWorkUrl(mangaUrl)
+        parseDetails(readAllowedHtml(resolvedUrl), resolvedUrl)
             ?: throw IllegalStateException("No manga details matched configured selectors")
     }
 
     override suspend fun getChapters(mangaUrl: String): List<MangaChapter> = withContext(Dispatchers.IO) {
-        val html = readAllowedHtml(mangaUrl)
-        parseChapters(html, "${id}_${mangaUrl.hashCode().toUInt()}", mangaUrl)
+        val resolvedUrl = resolveWorkUrl(mangaUrl)
+        val html = readAllowedHtml(resolvedUrl)
+        parseChapters(html, "${id}_${resolvedUrl.hashCode().toUInt()}", resolvedUrl)
     }
 
     override suspend fun getPages(chapterUrl: String): List<MangaPage> = withContext(Dispatchers.IO) {
         parseReaderPages(readAllowedHtml(chapterUrl), chapterUrl)
+    }
+
+    private fun resolveWorkUrl(mangaIdOrUrl: String): String {
+        if (mangaIdOrUrl.startsWith("https://")) return mangaIdOrUrl
+        sharedUrlById[mangaIdOrUrl]?.let { return it }
+        val slug = mangaIdOrUrl.removePrefix("${id}_")
+        val basePath = configuration.catalogPath.trimEnd('/')
+        return "https://${configuration.domain}$basePath/$slug/"
     }
 
     /** Selector-specific parser, without silently falling back to unrelated site layouts. */
@@ -179,12 +200,20 @@ class DynamicSourceAdapter(val configuration: SourceConfiguration) : Configurabl
             val link = node.selectFirst(configuration.detailLinkSelector) ?: titleNode
             val href = HtmlImageExtractor.resolveUrl(pageBaseUri, link.attr("href")) ?: return@mapNotNull null
             if (!isSafeRedirectDestination(configuration.domain, href)) return@mapNotNull null
-            val title = titleNode.text().trim().ifBlank { titleNode.attr("title").trim() }
+            val rawTitle = titleNode.text().trim().ifBlank { titleNode.attr("title").trim() }
+            val title = cleanExtractedMangaTitle(rawTitle)
             if (title.isBlank()) return@mapNotNull null
             val cover = HtmlImageExtractor.extractImageUrl(node.selectFirst(configuration.coverSelector), pageBaseUri)
-            MangaSummary(id = "${id}_${href.hashCode().toUInt()}", sourceId = id,
-                title = title, coverUrl = cover, mangaUrl = href,
-                genres = node.select(configuration.genreSelector).map { it.text().trim() }.filter { it.isNotBlank() })
+            val summaryId = "${id}_${href.hashCode().toUInt()}"
+            sharedUrlById[summaryId] = href
+            MangaSummary(
+                id = summaryId,
+                sourceId = id,
+                title = title,
+                coverUrl = cover,
+                mangaUrl = href,
+                genres = node.select(configuration.genreSelector).map { it.text().trim() }.filter { it.isNotBlank() }
+            )
         }.distinctBy { it.mangaUrl }
     }
 
@@ -201,9 +230,13 @@ class DynamicSourceAdapter(val configuration: SourceConfiguration) : Configurabl
             val url = HtmlImageExtractor.resolveUrl(mangaUrl, link.attr("href")) ?: return@mapIndexedNotNull null
             if (!isSafeRedirectDestination(configuration.domain, url)) return@mapIndexedNotNull null
             MangaChapter(
-                id = "${id}_${url.hashCode().toUInt()}", mangaId = mangaId,
-                sourceId = id, remoteId = url, title = link.text().ifBlank { "الفصل ${index + 1}" },
-                chapterNumber = null, uploadDate = null
+                id = "${id}_${url.hashCode().toUInt()}",
+                mangaId = mangaId,
+                sourceId = id,
+                remoteId = url,
+                title = link.text().trim().ifBlank { "الفصل ${index + 1}" },
+                chapterNumber = null,
+                uploadDate = null
             )
         }.distinctBy { it.remoteId }
     }
@@ -212,12 +245,28 @@ class DynamicSourceAdapter(val configuration: SourceConfiguration) : Configurabl
         val document = Jsoup.parse(html, mangaUrl)
         val title = document.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val mangaId = "${id}_${mangaUrl.hashCode().toUInt()}"
-        return MangaDetails(id = mangaId, sourceId = id, title = title, alternativeTitles = emptyList(),
+        sharedUrlById[mangaId] = mangaUrl
+        val statusRaw = document.select(configuration.statusSelector).text().trim()
+        val parsedStatus = parseNormalizedMangaStatus(statusRaw)
+        val parsedRating = parseRatingFromDoc(document)
+        return MangaDetails(
+            id = mangaId,
+            sourceId = id,
+            title = cleanExtractedMangaTitle(title),
+            alternativeTitles = emptyList(),
             coverUrl = HtmlImageExtractor.extractImageUrl(document.selectFirst(configuration.coverSelector), mangaUrl),
-            description = document.select(configuration.descriptionSelector).text(), author = null, artist = null,
-            status = document.select(configuration.statusSelector).text(),
-            genres = document.select(configuration.genreSelector).map { it.text() }, rating = null,
-            chapters = parseChapters(html, mangaId, mangaUrl))
+            description = document.select(configuration.descriptionSelector).text().trim(),
+            author = document.selectFirst(".author-content a")?.text()?.trim()?.takeIf { it.isNotBlank() },
+            artist = document.selectFirst(".artist-content a")?.text()?.trim()?.takeIf { it.isNotBlank() },
+            status = parsedStatus,
+            genres = document.select(configuration.genreSelector).map { it.text().trim() }.filter { it.isNotBlank() },
+            rating = parsedRating,
+            chapters = parseChapters(html, mangaId, mangaUrl)
+        )
+    }
+
+    companion object {
+        private val sharedUrlById = java.util.concurrent.ConcurrentHashMap<String, String>()
     }
 }
 
@@ -245,7 +294,12 @@ class SourceDiscoveryEngine {
         val domain = normalizeDomain(domainInput)
         val url = "https://$domain/"
         try {
-            client.newCall(Request.Builder().url(url).header("Accept", "text/html,application/json;q=0.9").build())
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("User-Agent", VerificationManager.getUserAgent())
+                .header("Accept", "text/html,application/json;q=0.9")
+            VerificationManager.getCookieHeader(url)?.let { reqBuilder.header("Cookie", it) }
+            client.newCall(reqBuilder.build())
                 .execute().use { response ->
                     val contentType = response.header("Content-Type").orEmpty().lowercase()
                     val html = response.body?.string()?.take(400_000).orEmpty()
@@ -311,10 +365,11 @@ class UniversalSourceEngine(
     val tests = SourceTestRunner(SourceHealthChecker(verificationManager))
 }
 
-/** Allows old saved IDs to continue using their original specialized adapter without losing DB associations. */
+/** Allows saved IDs and custom user-chosen source names to wrap their original specialized adapter without losing DB associations or replacing the connector. */
 class AliasedMangaSource(
     val original: MangaSource,
-    override val id: String
+    override val id: String,
+    override val name: String = original.name
 ) : MangaSource by original {
     override fun parseVerifiedHtmlSnapshot(html: String, pageBaseUri: String): List<MangaSummary> =
         original.parseVerifiedHtmlSnapshot(html, pageBaseUri).map { it.copy(sourceId = id) }

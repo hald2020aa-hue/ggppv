@@ -66,6 +66,9 @@ class ChapterDownloadWorker(
         if (task.status == DownloadStatus.COMPLETED.name || task.status == DownloadStatus.CANCELLED.name) {
             return Result.success()
         }
+        if (DownloadEngine.isForegroundTaskActive(taskId)) {
+            return Result.success()
+        }
 
         val chapter = dao.getChapterById(task.chapterId) ?: return Result.failure()
         val manga = dao.getMangaById(chapter.mangaId) ?: return Result.failure()
@@ -177,6 +180,11 @@ class DownloadEngine(
     private val activeJobs = ConcurrentHashMap<String, Job>()
     private val concurrencySemaphore = Semaphore(3)
 
+    companion object {
+        private val activeForegroundTaskIds = ConcurrentHashMap.newKeySet<String>()
+        fun isForegroundTaskActive(taskId: String): Boolean = activeForegroundTaskIds.contains(taskId)
+    }
+
     fun enqueueChapterDownload(
         mangaId: String,
         mangaTitle: String,
@@ -188,11 +196,30 @@ class DownloadEngine(
         scope.launch {
             val source = registry.findById(chapter.sourceId)
             val pages = source?.getPages(chapter.remoteId).orEmpty()
-            val totalPages = pages.size.coerceAtLeast(21)
-
             val existing = db.mangaDao().getDownloadTaskById(taskId)
+
+            if (pages.isEmpty()) {
+                val failedEntity = DownloadTaskEntity(
+                    id = taskId,
+                    chapterId = chapter.id,
+                    mangaId = mangaId,
+                    mangaTitle = mangaTitle,
+                    chapterTitle = "الفصل ${chapter.title}",
+                    coverUrl = coverUrl,
+                    status = DownloadStatus.FAILED.name,
+                    totalPages = 0,
+                    downloadedPages = 0,
+                    failedPages = 1,
+                    progress = 0,
+                    createdAt = existing?.createdAt ?: System.currentTimeMillis()
+                )
+                db.mangaDao().upsertDownloadTask(failedEntity)
+                return@launch
+            }
+
+            val totalPages = pages.size
             val resumePages = if (existing != null && existing.status == DownloadStatus.PAUSED.name) {
-                existing.downloadedPages
+                existing.downloadedPages.coerceIn(0, totalPages)
             } else {
                 0
             }
@@ -214,7 +241,11 @@ class DownloadEngine(
             db.mangaDao().upsertDownloadTask(entity)
             db.mangaDao().setMangaSavedInStorage(mangaId, true)
 
-            // Schedule WorkManager task for background persistence across app restarts
+            // Mark foreground task active BEFORE scheduling WorkManager so the worker never races
+            activeForegroundTaskIds.add(taskId)
+            startTaskCoroutine(taskId, chapter, mangaTitle, pages, resumePages)
+
+            // Schedule WorkManager task as a fallback if the process is killed before completion
             runCatching {
                 val constraints = Constraints.Builder()
                     .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
@@ -225,13 +256,10 @@ class DownloadEngine(
                     .build()
                 WorkManager.getInstance(context).enqueueUniqueWork(
                     taskId,
-                    ExistingWorkPolicy.REPLACE,
+                    ExistingWorkPolicy.KEEP,
                     workRequest
                 )
             }
-
-            // Also run foreground-aware coroutine execution so UI progress bar updates smoothly
-            startTaskCoroutine(taskId, chapter, mangaTitle, pages, resumePages)
         }
     }
 
@@ -243,14 +271,26 @@ class DownloadEngine(
         startFromPage: Int
     ) {
         activeJobs[taskId]?.cancel()
+        activeForegroundTaskIds.add(taskId)
         val job = scope.launch {
-            concurrencySemaphore.withPermit {
-                val dao = db.mangaDao()
-                val source = registry.findById(chapter.sourceId)
-                val pages = if (pagesInput.isNotEmpty()) pagesInput else source?.getPages(chapter.remoteId).orEmpty()
-                val total = pages.size.coerceAtLeast(1)
-                var downloaded = startFromPage.coerceIn(0, total)
-                var failed = 0
+            try {
+                concurrencySemaphore.withPermit {
+                    val dao = db.mangaDao()
+                    val source = registry.findById(chapter.sourceId)
+                    val pages = if (pagesInput.isNotEmpty()) pagesInput else source?.getPages(chapter.remoteId).orEmpty()
+                    if (pages.isEmpty()) {
+                        dao.updateDownloadTaskProgress(
+                            taskId = taskId,
+                            status = DownloadStatus.FAILED.name,
+                            downloadedPages = 0,
+                            failedPages = 1,
+                            progress = 0
+                        )
+                        return@withPermit
+                    }
+                    val total = pages.size
+                    var downloaded = startFromPage.coerceIn(0, total)
+                    var failed = 0
 
                 for (i in downloaded until total) {
                     val current = dao.getDownloadTaskById(taskId) ?: return@withPermit
@@ -312,15 +352,18 @@ class DownloadEngine(
                         failedPages = 0,
                         progress = 100
                     )
-                } else {
-                    dao.updateDownloadTaskProgress(
-                        taskId = taskId,
-                        status = DownloadStatus.FAILED.name,
-                        downloadedPages = downloaded,
-                        failedPages = failed,
-                        progress = (downloaded * 100) / total
-                    )
+                    } else {
+                        dao.updateDownloadTaskProgress(
+                            taskId = taskId,
+                            status = DownloadStatus.FAILED.name,
+                            downloadedPages = downloaded,
+                            failedPages = failed,
+                            progress = (downloaded * 100) / total
+                        )
+                    }
                 }
+            } finally {
+                activeForegroundTaskIds.remove(taskId)
             }
         }
         activeJobs[taskId] = job

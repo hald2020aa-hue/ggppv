@@ -83,6 +83,8 @@ class AppPreferences(private val context: Context) {
         val FAVORITE_CATEGORIES = stringPreferencesKey("favorite_categories")
         val VERIFICATION_SESSIONS_METADATA = stringPreferencesKey("verification_sessions_metadata")
         val INITIAL_SOURCES_CLEARED_V2 = booleanPreferencesKey("initial_sources_cleared_v2")
+        val DEFAULT_SOURCES_SEEDED_V3 = booleanPreferencesKey("default_sources_seeded_v3")
+        val DELETED_BUILTIN_IDS = stringPreferencesKey("deleted_builtin_ids")
         val ADULT_ENABLED = booleanPreferencesKey("adult_enabled")
         val ADULT_ACKNOWLEDGED = booleanPreferencesKey("adult_age_acknowledged")
         val HIDE_SENSITIVE_COVERS = booleanPreferencesKey("hide_sensitive_covers")
@@ -95,6 +97,48 @@ class AppPreferences(private val context: Context) {
     suspend fun markInitialSourcesCleared() {
         context.dataStore.edit { prefs ->
             prefs[Keys.INITIAL_SOURCES_CLEARED_V2] = true
+        }
+    }
+
+    val defaultSourcesSeededFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.DEFAULT_SOURCES_SEEDED_V3] ?: false
+    }
+
+    suspend fun markDefaultSourcesSeeded() {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.DEFAULT_SOURCES_SEEDED_V3] = true
+        }
+    }
+
+    val deletedBuiltInIdsFlow: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        prefs[Keys.DELETED_BUILTIN_IDS].orEmpty()
+            .split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+    }
+
+    suspend fun markBuiltInSourceDeleted(sourceId: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.DELETED_BUILTIN_IDS].orEmpty()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toMutableSet()
+            current.add(sourceId)
+            prefs[Keys.DELETED_BUILTIN_IDS] = current.joinToString(",")
+        }
+    }
+
+    suspend fun unmarkBuiltInSourceDeleted(sourceId: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.DELETED_BUILTIN_IDS].orEmpty()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toMutableSet()
+            current.remove(sourceId)
+            prefs[Keys.DELETED_BUILTIN_IDS] = current.joinToString(",")
         }
     }
 

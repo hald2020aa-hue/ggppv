@@ -1,16 +1,10 @@
 package com.example.core.storage
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.Shader
-import android.os.Build
 import android.os.StatFs
+import com.example.core.verification.VerificationManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -43,14 +37,16 @@ data class StorageStats(
 /**
  * Rule 11, 12, 13: Local Chapter Storage Engine.
  * Hierarchy: saved/{source_id}/{manga_id}/chapter_{xxx}/0001.webp
- * Uses .tmp files first, validates response content-type and size, checks free disk space,
- * and supports offline reading without network access.
+ * Uses .tmp files first, validates response content-type and raster magic bytes, checks free disk space,
+ * and never synthesizes fake comic pages on failure.
  */
 class LocalChapterStorage(private val context: Context) {
 
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     fun getSavedRootDir(): File {
@@ -109,8 +105,9 @@ class LocalChapterStorage(private val context: Context) {
     }
 
     /**
-     * Downloads or renders a manga page into a temporary `.tmp` file, validates that it is a valid
-     * non-HTML image with size > 128 bytes, and atomically renames it to `0001.webp`.
+     * Downloads a real manga page image into a temporary `.tmp` file, validates that it is a valid
+     * non-HTML raster image with size > 256 bytes, and atomically renames it to `0001.webp`.
+     * Never generates synthetic placeholder artwork if the network download fails.
      */
     suspend fun downloadAndSavePage(
         sourceId: String,
@@ -128,163 +125,105 @@ class LocalChapterStorage(private val context: Context) {
         }
 
         val finalFile = getPageFile(sourceId, mangaId, chapterNumber, pageIndex)
-        if (finalFile.exists() && finalFile.length() > 512L) {
+        if (finalFile.exists() && finalFile.length() > 256L && isLikelyRasterImageFile(finalFile)) {
             return@withContext Result.success(finalFile)
         }
 
+        if (!imageUrl.startsWith("http://") && !imageUrl.startsWith("https://")) {
+            return@withContext Result.failure(IllegalArgumentException("INVALID_IMAGE_URL: $imageUrl"))
+        }
+
         val tempFile = File(finalFile.parentFile, "${finalFile.name}.tmp")
-        try {
-            var networkSucceeded = false
-            if (imageUrl.startsWith("https://") && !imageUrl.contains("manhwa.local")) {
-                runCatching {
-                    val reqBuilder = Request.Builder()
-                        .url(imageUrl)
-                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
-                    if (!refererUrl.isNullOrBlank()) {
-                        reqBuilder.header("Referer", refererUrl)
+        var lastError: Throwable? = null
+
+        for (attempt in 1..3) {
+            try {
+                val reqBuilder = Request.Builder()
+                    .url(imageUrl)
+                    .header("User-Agent", VerificationManager.getUserAgent())
+                    .header("Accept", "image/avif,image/webp,image/apng,image/png,image/jpeg,image/*,*/*;q=0.8")
+                if (!refererUrl.isNullOrBlank()) {
+                    reqBuilder.header("Referer", refererUrl)
+                }
+                VerificationManager.getCookieHeader(imageUrl)?.let { reqBuilder.header("Cookie", it) }
+
+                okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IllegalStateException("HTTP_${response.code}")
                     }
-                    okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
-                        val contentType = response.header("Content-Type")?.lowercase(Locale.ROOT) ?: ""
-                        // Rule 11: Reject HTML responses masquerading as images
-                        if (response.isSuccessful && contentType.startsWith("image/") && !contentType.contains("html")) {
-                            val bodyBytes = response.body?.bytes()
-                            if (bodyBytes != null && bodyBytes.size > 512) {
-                                FileOutputStream(tempFile).use { it.write(bodyBytes) }
-                                networkSucceeded = true
-                            }
-                        }
+                    val contentType = response.header("Content-Type")?.lowercase(Locale.ROOT).orEmpty()
+                    if (contentType.contains("text/html") || contentType.contains("application/xhtml")) {
+                        throw IllegalStateException("EXPECTED_IMAGE_GOT_HTML")
+                    }
+                    val bodyBytes = response.body?.bytes()
+                        ?: throw IllegalStateException("EMPTY_IMAGE_BODY")
+                    if (bodyBytes.size <= 256 || !isLikelyRasterImageBytes(bodyBytes)) {
+                        throw IllegalStateException("INVALID_RASTER_IMAGE_BYTES")
+                    }
+                    FileOutputStream(tempFile).use { out ->
+                        out.write(bodyBytes)
+                        out.flush()
                     }
                 }
-            }
 
-            if (!networkSucceeded) {
-                // Generate high-contrast vertical webtoon art panel locally into tempFile
-                renderWebtoonPageToTempFile(
-                    tempFile = tempFile,
-                    pageIndex = pageIndex,
-                    mangaTitle = mangaTitle,
-                    chapterTitle = chapterTitle,
-                    dialogueAr = dialogueAr
-                )
+                if (tempFile.exists() && tempFile.length() > 256L && isLikelyRasterImageFile(tempFile)) {
+                    if (finalFile.exists()) {
+                        finalFile.delete()
+                    }
+                    val renamed = tempFile.renameTo(finalFile)
+                    if (!renamed) {
+                        tempFile.copyTo(finalFile, overwrite = true)
+                        tempFile.delete()
+                    }
+                    return@withContext Result.success(finalFile)
+                }
+            } catch (e: Exception) {
+                lastError = e
+                runCatching { tempFile.delete() }
+                if (attempt < 3) {
+                    delay(350L * attempt)
+                }
             }
+        }
 
-            if (!tempFile.exists() || tempFile.length() < 128L) {
-                tempFile.delete()
-                return@withContext Result.failure(IllegalStateException("INVALID_IMAGE_FILE"))
-            }
+        runCatching { tempFile.delete() }
+        Result.failure(lastError ?: IllegalStateException("FAILED_TO_DOWNLOAD_PAGE_${pageIndex + 1}"))
+    }
 
-            if (finalFile.exists()) {
-                finalFile.delete()
-            }
-            val renamed = tempFile.renameTo(finalFile)
-            if (!renamed) {
-                tempFile.copyTo(finalFile, overwrite = true)
-                tempFile.delete()
-            }
-            Result.success(finalFile)
-        } catch (e: Exception) {
-            tempFile.delete()
-            Result.failure(e)
+    internal fun isLikelyRasterImageFile(file: File): Boolean {
+        if (!file.exists() || file.length() < 12L) return false
+        return try {
+            val header = ByteArray(12)
+            file.inputStream().use { it.read(header) }
+            isLikelyRasterImageBytes(header)
+        } catch (_: Exception) {
+            false
         }
     }
 
-    private fun renderWebtoonPageToTempFile(
-        tempFile: File,
-        pageIndex: Int,
-        mangaTitle: String,
-        chapterTitle: String,
-        dialogueAr: String
-    ) {
-        val width = 800
-        val height = 1280
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-
-        val palettes = listOf(
-            intArrayOf(0xFF0F172A.toInt(), 0xFF1E1B4B.toInt(), 0xFF312E81.toInt()),
-            intArrayOf(0xFF18181B.toInt(), 0xFF3F1D38.toInt(), 0xFF1F2937.toInt()),
-            intArrayOf(0xFF090D16.toInt(), 0xFF1E293B.toInt(), 0xFF0F3D3E.toInt()),
-            intArrayOf(0xFF1A1025.toInt(), 0xFF2E1065.toInt(), 0xFF111827.toInt())
-        )
-        val pal = palettes[pageIndex % palettes.size]
-
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, width.toFloat(), height.toFloat(),
-                pal, null, Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
-
-        // Draw dramatic webtoon panel frames
-        val panelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(190, 18, 22, 34)
-            style = Paint.Style.FILL
-        }
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(180, 150, 176, 248)
-            style = Paint.Style.STROKE
-            strokeWidth = 4f
-        }
-
-        val topPanel = RectF(48f, 70f, width - 48f, 520f)
-        canvas.drawRoundRect(topPanel, 18f, 18f, panelPaint)
-        canvas.drawRoundRect(topPanel, 18f, 18f, borderPaint)
-
-        // Speed lines inside top panel
-        val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(45, 255, 255, 255)
-            strokeWidth = 2f
-        }
-        for (i in 0..16) {
-            val x = 60f + i * 42f
-            canvas.drawLine(x, 80f, x - 35f, 500f, linePaint)
-        }
-
-        // Speech bubble 1
-        val bubblePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            style = Paint.Style.FILL
-        }
-        val bubbleRect = RectF(90f, 150f, width - 90f, 340f)
-        canvas.drawRoundRect(bubbleRect, 48f, 48f, bubblePaint)
-
-        val textPaintDark = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(20, 24, 36)
-            textSize = 32f
-            textAlign = Paint.Align.CENTER
-            isFakeBoldText = true
-        }
-        canvas.drawText(mangaTitle.take(28), width / 2f, 225f, textPaintDark)
-        textPaintDark.textSize = 26f
-        canvas.drawText("$chapterTitle • صفحة ${pageIndex + 1}", width / 2f, 285f, textPaintDark)
-
-        // Bottom dramatic panel
-        val bottomPanel = RectF(48f, 580f, width - 48f, 1140f)
-        canvas.drawRoundRect(bottomPanel, 18f, 18f, panelPaint)
-        canvas.drawRoundRect(bottomPanel, 18f, 18f, borderPaint)
-
-        // Speech bubble 2 with Arabic dialogue
-        val bubbleRect2 = RectF(80f, 700f, width - 80f, 980f)
-        canvas.drawRoundRect(bubbleRect2, 54f, 54f, bubblePaint)
-
-        val lines = dialogueAr.chunked(32)
-        var yPos = 790f
-        for (line in lines.take(3)) {
-            canvas.drawText(line, width / 2f, yPos, textPaintDark)
-            yPos += 50f
-        }
-
-        FileOutputStream(tempFile).use { out ->
-            val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                Bitmap.CompressFormat.WEBP_LOSSY
-            } else {
-                @Suppress("DEPRECATION")
-                Bitmap.CompressFormat.WEBP
-            }
-            bitmap.compress(format, 85, out)
-        }
-        bitmap.recycle()
+    internal fun isLikelyRasterImageBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        val isJpeg = (bytes[0].toInt() and 0xFF) == 0xFF && (bytes[1].toInt() and 0xFF) == 0xD8
+        val isPng = (bytes[0].toInt() and 0xFF) == 0x89 &&
+            bytes[1] == 'P'.code.toByte() &&
+            bytes[2] == 'N'.code.toByte() &&
+            bytes[3] == 'G'.code.toByte()
+        val isGif = bytes[0] == 'G'.code.toByte() &&
+            bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte()
+        val isWebp = bytes[0] == 'R'.code.toByte() &&
+            bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte() &&
+            bytes[3] == 'F'.code.toByte() &&
+            bytes[8] == 'W'.code.toByte() &&
+            bytes[9] == 'E'.code.toByte() &&
+            bytes[10] == 'B'.code.toByte() &&
+            bytes[11] == 'P'.code.toByte()
+        val isAvifOrHeif = bytes[4] == 'f'.code.toByte() &&
+            bytes[5] == 't'.code.toByte() &&
+            bytes[6] == 'y'.code.toByte() &&
+            bytes[7] == 'p'.code.toByte()
+        return isJpeg || isPng || isGif || isWebp || isAvifOrHeif
     }
 
     suspend fun deleteChapterFiles(sourceId: String, mangaId: String, chapterNumber: Float?) = withContext(Dispatchers.IO) {

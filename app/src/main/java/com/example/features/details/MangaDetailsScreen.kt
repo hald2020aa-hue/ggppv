@@ -28,16 +28,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -53,10 +53,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -110,6 +113,7 @@ fun MangaDetailsScreen(
     }
     var showBottomMoreMenu by remember { mutableStateOf(false) }
     var descriptionExpanded by remember { mutableStateOf(false) }
+    var selectedDetailsTab by remember { mutableIntStateOf(1) } // 0 = الوصف, 1 = الفصول, 2 = التعليقات
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Top Header Bar
@@ -150,7 +154,7 @@ fun MangaDetailsScreen(
                     modifier = Modifier.testTag("chapters_sort_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Sort,
+                        imageVector = Icons.AutoMirrored.Filled.Sort,
                         contentDescription = "ترتيب الفصول"
                     )
                 }
@@ -254,79 +258,154 @@ fun MangaDetailsScreen(
                         )
                     }
 
-                    // 2. Section Header for Chapters
+                    // 2. Reference App 3-Tab Bar: الوصف | الفصول | التعليقات
                     item {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        TabRow(
+                            selectedTabIndex = selectedDetailsTab,
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            contentColor = MaterialTheme.colorScheme.primary
                         ) {
-                            Text(
-                                text = "قائمة الفصول (${sortedChapters.size})",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
+                            Tab(
+                                selected = selectedDetailsTab == 0,
+                                onClick = { selectedDetailsTab = 0 },
+                                text = { Text("الوصف") }
                             )
-                            Text(
-                                text = if (state.sortDescending) "الأحدث أولاً" else "الأقدم أولاً",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.clickable { onToggleSort() }
+                            Tab(
+                                selected = selectedDetailsTab == 1,
+                                onClick = { selectedDetailsTab = 1 },
+                                text = { Text("الفصول (${sortedChapters.size})") }
+                            )
+                            Tab(
+                                selected = selectedDetailsTab == 2,
+                                onClick = { selectedDetailsTab = 2 },
+                                text = { Text("التعليقات") }
                             )
                         }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
                     }
 
-                    // 3. Chapters List Items
-                    when {
-                        state.isLoading && sortedChapters.isEmpty() -> {
+                    when (selectedDetailsTab) {
+                        0 -> {
                             item {
-                                Box(
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(220.dp),
-                                    contentAlignment = Alignment.Center
+                                        .padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    CircularProgressIndicator()
-                                }
-                            }
-                        }
-                        sortedChapters.isEmpty() -> {
-                            item {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(28.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = "قصة العمل",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = details?.description?.takeIf { it.isNotBlank() } ?: "لا يتوفر وصف تفصيلي لهذا العمل من المصدر حالياً.",
+                                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (!details?.alternativeTitles.isNullOrEmpty()) {
+                                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
                                         Text(
-                                            text = state.errorMessageAr ?: "لم يتم العثور على فصول",
-                                            style = MaterialTheme.typography.bodyMedium,
+                                            text = "أسماء بديلة: ${details?.alternativeTitles?.joinToString(" ، ")}",
+                                            style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-                                        Spacer(modifier = Modifier.height(10.dp))
-                                        TextButton(onClick = onRefreshDetails) {
-                                            Text("إعادة المحاولة")
-                                        }
                                     }
                                 }
                             }
                         }
+                        2 -> {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(32.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "لا توجد تعليقات متاحة لهذا العمل حالياً.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
                         else -> {
-                            itemsIndexed(sortedChapters, key = { _, ch -> ch.id }) { index, chapter ->
-                                ChapterRowItem(
-                                    index = index,
-                                    chapter = chapter,
-                                    sortedChapters = sortedChapters,
-                                    onOpenChapter = {
-                                        val startPage = (chapter.lastReadPage - 1).coerceAtLeast(0)
-                                        onOpenChapterReader(chapter.id, startPage, 0)
-                                    },
-                                    onDownloadSingle = { onDownloadSingleChapter(chapter.id) },
-                                    onRequestBatch = onRequestBatchDownload
-                                )
+                            // Section Header for Chapters
+                            item {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "قائمة الفصول (${sortedChapters.size})",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = if (state.sortDescending) "الأحدث أولاً" else "الأقدم أولاً",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.clickable { onToggleSort() }
+                                    )
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                            }
+
+                            // Chapters List Items
+                            when {
+                                state.isLoading && sortedChapters.isEmpty() -> {
+                                    item {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(220.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            CircularProgressIndicator()
+                                        }
+                                    }
+                                }
+                                sortedChapters.isEmpty() -> {
+                                    item {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(28.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                Text(
+                                                    text = state.errorMessageAr ?: "لم يتم العثور على فصول",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Spacer(modifier = Modifier.height(10.dp))
+                                                TextButton(onClick = onRefreshDetails) {
+                                                    Text("إعادة المحاولة")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                else -> {
+                                    itemsIndexed(sortedChapters, key = { _, ch -> ch.id }) { index, chapter ->
+                                        ChapterRowItem(
+                                            index = index,
+                                            chapter = chapter,
+                                            sortedChapters = sortedChapters,
+                                            onOpenChapter = {
+                                                val startPage = (chapter.lastReadPage - 1).coerceAtLeast(0)
+                                                onOpenChapterReader(chapter.id, startPage, 0)
+                                            },
+                                            onDownloadSingle = { onDownloadSingleChapter(chapter.id) },
+                                            onRequestBatch = onRequestBatchDownload
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -584,12 +663,20 @@ private fun PhoneMangaMetadataSection(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
+                val statusLabel = when {
+                    details?.status.equals("Completed", true) -> "مكتملة • Completed"
+                    details?.status.equals("Hiatus", true) -> "متوقفة • Hiatus"
+                    details?.status.equals("Cancelled", true) -> "ملغاة • Cancelled"
+                    details?.status.equals("OnGoing", true) -> "مستمرة • OnGoing"
+                    else -> "غير معروفة"
+                }
+
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = if (details?.status.equals("Completed", true)) "مكتملة • Completed" else "مستمرة • OnGoing",
+                        text = statusLabel,
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -645,7 +732,7 @@ private fun PhoneMangaMetadataSection(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "${details?.rating ?: 4.7f}",
+                            text = details?.rating?.let { String.format(Locale.US, "%.1f", it) } ?: "غير متوفر",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -660,7 +747,7 @@ private fun PhoneMangaMetadataSection(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.MenuBook,
+                            imageVector = Icons.AutoMirrored.Filled.MenuBook,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(17.dp)

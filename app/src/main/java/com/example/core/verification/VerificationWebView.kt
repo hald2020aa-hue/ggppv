@@ -506,8 +506,13 @@ fun VerificationWebView(
                                 settings.allowContentAccess = false
                                 settings.javaScriptCanOpenWindowsAutomatically = false
                                 settings.setSupportMultipleWindows(false)
-                                settings.userAgentString =
-                                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+                                val actualUa = settings.userAgentString
+                                    .replace("; wv", "")
+                                    .ifBlank {
+                                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+                                    }
+                                settings.userAgentString = actualUa
+                                VerificationManager.recordActiveUserAgent(actualUa)
 
                                 webChromeClient = object : WebChromeClient() {
                                     override fun onProgressChanged(view: WebView?, newProgress: Int) {

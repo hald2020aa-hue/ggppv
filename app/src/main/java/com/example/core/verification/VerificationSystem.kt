@@ -1,5 +1,12 @@
 package com.example.core.verification
 
+import android.annotation.SuppressLint
+import android.content.Context
+import android.os.Looper
+import android.webkit.CookieManager
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.example.core.common.PipelineLogger
 import com.example.core.common.PipelineStage
 import com.example.core.common.normalizeDomain
@@ -7,13 +14,18 @@ import com.example.core.storage.AppPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.resume
 
 /**
  * Section 6 & 7: Explicit states for the Universal Website Verification System.
@@ -64,12 +76,6 @@ class VerificationRequiredException(
 
 /**
  * Section 1: Universal multi-signal detector for website security challenges.
- * - Detects Cloudflare Verification, Human Verification (hCaptcha/reCAPTCHA/Turnstile),
- *   Browser Integrity Checks (DDoS-Guard/Sucuri/Browser Check), Security Waiting Rooms,
- *   and Content-Blocking Challenge pages.
- * - Does NOT rely on the word "Cloudflare" alone (e.g., ignores normal 200 OK manga pages that use
- *   Cloudflare CDN scripts in their footer).
- * - Does NOT classify empty HTML pages or normal "0 results" pages as verification challenges.
  */
 object VerificationDetector {
 
@@ -134,7 +140,6 @@ object VerificationDetector {
         pageTitle: String = ""
     ): VerificationDetectionResult {
         val trimmed = html.trim()
-        // Rule 1: Never treat an empty or blank response body as a verification page unless headers explicitly say so
         val cfMitigatedHeader = headers.entries
             .firstOrNull { it.key.equals("cf-mitigated", ignoreCase = true) }
             ?.value.orEmpty()
@@ -162,8 +167,6 @@ object VerificationDetector {
         val doc = runCatching { Jsoup.parse(trimmed) }.getOrNull()
         val effectiveTitle = pageTitle.ifBlank { doc?.title().orEmpty() }.trim().lowercase()
 
-        // Check if the page already contains real manga catalog/chapter DOM elements.
-        // If HTTP 200 and real manga cards/chapters exist, a mere "cloudflare" script in the footer is NOT a challenge!
         val hasRealMangaContent = doc != null && (
             doc.select("div.page-item-detail, div.bsx, div.c-tabs-item__content, div.manga-item, li.wp-manga-chapter, #chapterlist li, .reading-content img").size >= 2 ||
                 doc.select("a[href*=/manga/], a[href*=/series/]").size >= 3
@@ -179,30 +182,24 @@ object VerificationDetector {
 
         val matched = mutableListOf<String>()
 
-        // 1. Check Challenge Titles
         for (titleSignal in CHALLENGE_TITLES) {
             if (effectiveTitle.contains(titleSignal)) {
                 matched.add("title:$titleSignal")
             }
         }
 
-        // 2. Check Cloudflare Turnstile / Challenge Widget signals
         val cfSignals = CLOUDFLARE_DOM_SIGNALS.filter { lowerHtml.contains(it) }
         matched.addAll(cfSignals)
 
-        // 3. Check Human CAPTCHA signals
         val humanSignals = HUMAN_CAPTCHA_SIGNALS.filter { lowerHtml.contains(it) }
         matched.addAll(humanSignals)
 
-        // 4. Check Browser Integrity signals
         val browserSignals = BROWSER_CHECK_SIGNALS.filter { lowerHtml.contains(it) }
         matched.addAll(browserSignals)
 
-        // 5. Check Security Waiting Room signals
         val waitingSignals = WAITING_ROOM_SIGNALS.filter { lowerHtml.contains(it) }
         matched.addAll(waitingSignals)
 
-        // 6. Check HTTP 403 / 503 / 429 combined with security challenge markers (not relying on the word "cloudflare" alone)
         val isChallengeStatusCode = httpCode in listOf(403, 503, 429)
         if (isChallengeStatusCode) {
             if (lowerHtml.contains("ray id") ||
@@ -249,10 +246,6 @@ object VerificationDetector {
         )
     }
 
-    /**
-     * Section 4: Verifies that the security challenge page has ended and the loaded HTML
-     * represents a normal website page before marking verification as [VerificationState.COMPLETED].
-     */
     fun isNormalVerifiedPage(
         html: String,
         httpCode: Int = 200,
@@ -270,17 +263,12 @@ object VerificationDetector {
         val titleLower = pageTitle.ifBlank { doc.title() }.trim().lowercase()
         if (CHALLENGE_TITLES.any { titleLower.contains(it) }) return false
 
-        // Ensure the body has real structure (links, divs, images, or meaningful text)
         val hasStructure = body.select("a, img, div, article, section, main, ul, li, h1, h2, h3").isNotEmpty() ||
             body.text().trim().length >= 16
         return hasStructure
     }
 }
 
-/**
- * Represents the verification state and non-sensitive session metadata for a single source/domain.
- * Never stores or logs raw cookies or authentication tokens.
- */
 data class VerificationSession(
     val sourceId: String,
     val domain: String,
@@ -297,10 +285,6 @@ data class VerificationSession(
     }
 }
 
-/**
- * Section 4 & 6: Manages verification sessions, expiration checks, and verified WebView HTML snapshots.
- * Supports an injectable [clock] for deterministic unit testing of session expiration (`EXPIRED`).
- */
 class VerificationSessionManager(
     val defaultSessionTtlMs: Long = 30 * 60 * 1000L,
     private val clock: () -> Long = { System.currentTimeMillis() }
@@ -387,20 +371,12 @@ class VerificationSessionManager(
         return expired
     }
 
-    /**
-     * Serializes non-sensitive session metadata (`sourceId|domain|state|verifiedAtMs|expiresAtMs`)
-     * for local DataStore persistence across app restarts. Never serializes cookies, tokens, or HTML.
-     */
     fun serializeMetadata(): String {
         return sessionsByDomain.values.joinToString("\n") { s ->
             "${s.sourceId}|${s.domain}|${s.state.name}|${s.verifiedAtMs}|${s.expiresAtMs}"
         }
     }
 
-    /**
-     * Restores persisted session metadata when the app is re-opened (`إعادة فتح التطبيق`),
-     * automatically transitioning any expired `COMPLETED` session to `EXPIRED`.
-     */
     fun restoreFromMetadata(serialized: String) {
         if (serialized.isBlank()) return
         val now = clock()
@@ -441,9 +417,6 @@ class VerificationSessionManager(
     }
 }
 
-/**
- * Section 6: Repository managing verification sessions and persisting non-sensitive session metadata.
- */
 class VerificationRepository(
     val sessionManager: VerificationSessionManager = VerificationSessionManager(),
     private val preferences: AppPreferences? = null
@@ -514,18 +487,204 @@ class VerificationRepository(
     }
 }
 
-/**
- * Section 6: Central orchestrator for the Universal Website Verification System.
- * Connects [VerificationDetector], [VerificationSessionManager], and [VerificationRepository]
- * with [com.example.sourceapi.MangaSource], [com.example.data.repositories.MangaRepository],
- * and [com.example.features.MainViewModel].
- */
 class VerificationManager(
     val detector: VerificationDetector = VerificationDetector,
     val sessionManager: VerificationSessionManager = VerificationSessionManager(),
-    val repository: VerificationRepository = VerificationRepository(sessionManager)
+    val repository: VerificationRepository = VerificationRepository(sessionManager),
+    private val appContext: Context? = null
 ) {
     val sessionsFlow: StateFlow<Map<String, VerificationSession>> = repository.sessionsFlow
+
+    init {
+        if (appContext != null) {
+            sharedAppContext = appContext.applicationContext ?: appContext
+        }
+    }
+
+    companion object {
+        const val DEFAULT_MOBILE_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+
+        @Volatile
+        private var sharedWebViewUserAgent: String? = null
+
+        @Volatile
+        private var sharedAppContext: Context? = null
+
+        fun recordActiveUserAgent(userAgent: String?) {
+            val clean = userAgent?.trim()?.replace("; wv", "").orEmpty()
+            if (clean.isNotBlank()) {
+                sharedWebViewUserAgent = clean
+            }
+        }
+
+        /**
+         * Returns the exact User-Agent used by Android WebView so Cloudflare `cf_clearance`
+         * cookies bound to the WebView User-Agent remain valid during OkHttp requests.
+         */
+        fun getUserAgent(context: Context? = sharedAppContext): String {
+            sharedWebViewUserAgent?.let { if (it.isNotBlank()) return it }
+            if (context != null) {
+                val ua = runCatching {
+                    WebSettings.getDefaultUserAgent(context).replace("; wv", "").trim()
+                }.getOrNull()
+                if (!ua.isNullOrBlank()) {
+                    sharedWebViewUserAgent = ua
+                    return ua
+                }
+            }
+            return DEFAULT_MOBILE_USER_AGENT
+        }
+
+        /**
+         * Reads any session / Cloudflare clearance cookies stored in Android's CookieManager
+         * for [url] or its normalized domain.
+         */
+        fun getCookieHeader(url: String): String? {
+            return try {
+                val cm = CookieManager.getInstance() ?: return null
+                val direct = cm.getCookie(url)?.trim().orEmpty()
+                if (direct.isNotBlank()) return direct
+                val domain = normalizeDomain(url)
+                if (domain.isNotBlank()) {
+                    cm.getCookie("https://$domain")?.trim()?.takeIf { it.isNotBlank() }
+                        ?: cm.getCookie("https://www.$domain")?.trim()?.takeIf { it.isNotBlank() }
+                } else {
+                    null
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        /**
+         * Evaluates the live DOM of [url] inside an offscreen Android WebView sharing the app's
+         * [CookieManager] and TLS stack when a site blocks non-WebView TLS fingerprints or renders
+         * its catalog/chapters client-side via JavaScript.
+         * Safely returns null in local JVM unit tests where WebView is unavailable.
+         */
+        @SuppressLint("SetJavaScriptEnabled")
+        suspend fun fetchHtmlViaWebView(
+            url: String,
+            timeoutMs: Long = 10_500L,
+            context: Context? = sharedAppContext
+        ): String? {
+            val ctx = context ?: return null
+            val isRobolectric = runCatching {
+                android.os.Build.FINGERPRINT?.lowercase()?.contains("robolectric") == true
+            }.getOrDefault(false)
+            if (isRobolectric || Looper.getMainLooper() == null) return null
+
+            return withTimeoutOrNull(timeoutMs) {
+                withContext(Dispatchers.Main) {
+                    var webView: WebView? = null
+                    try {
+                        suspendCancellableCoroutine<String?> { cont ->
+                            val wv = WebView(ctx)
+                            webView = wv
+                            val cm = CookieManager.getInstance()
+                            cm.setAcceptCookie(true)
+                            cm.setAcceptThirdPartyCookies(wv, true)
+
+                            wv.settings.apply {
+                                javaScriptEnabled = true
+                                domStorageEnabled = true
+                                loadsImagesAutomatically = false
+                                userAgentString = (userAgentString ?: DEFAULT_MOBILE_USER_AGENT)
+                                    .replace("; wv", "")
+                                    .also { recordActiveUserAgent(it) }
+                            }
+
+                            var completed = false
+                            wv.webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                                    super.onPageFinished(view, loadedUrl)
+                                    if (completed || view == null) return
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        delay(950L)
+                                        if (completed || !cont.isActive) return@launch
+                                        view.evaluateJavascript(
+                                            "(function(){return document.documentElement ? document.documentElement.outerHTML : '';})();"
+                                        ) { rawJsResult ->
+                                            if (completed || !cont.isActive) return@evaluateJavascript
+                                            val decoded = decodeEvaluateJavascriptString(rawJsResult.orEmpty())
+                                            if (decoded.length > 200) {
+                                                completed = true
+                                                runCatching { cm.flush() }
+                                                cont.resume(decoded)
+                                            } else {
+                                                completed = true
+                                                cont.resume(null)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            cont.invokeOnCancellation {
+                                runCatching {
+                                    wv.stopLoading()
+                                    wv.destroy()
+                                }
+                            }
+
+                            wv.loadUrl(url)
+                        }
+                    } catch (_: Throwable) {
+                        null
+                    } finally {
+                        runCatching {
+                            webView?.stopLoading()
+                            webView?.destroy()
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun decodeEvaluateJavascriptString(raw: String): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty() || trimmed == "null") return ""
+            val unwrapped = if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
+                trimmed.substring(1, trimmed.length - 1)
+            } else {
+                trimmed
+            }
+            return unwrapped
+                .replace("\\u003C", "<")
+                .replace("\\u003c", "<")
+                .replace("\\u003E", ">")
+                .replace("\\u003e", ">")
+                .replace("\\u0026", "&")
+                .replace("\\\"", "\"")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace("\\\\", "\\")
+        }
+    }
+
+    fun getUserAgent(): String = Companion.getUserAgent(appContext ?: sharedAppContext)
+
+    fun getCookieHeader(url: String): String? = Companion.getCookieHeader(url)
+
+    suspend fun fetchHtmlViaWebView(
+        url: String,
+        timeoutMs: Long = 10_500L
+    ): String? = Companion.fetchHtmlViaWebView(url, timeoutMs, appContext ?: sharedAppContext)
+
+    fun saveVerifiedHtmlSnapshot(domainOrUrl: String, html: String) {
+        val domain = sessionManager.normalizeKey(domainOrUrl)
+        if (domain.isBlank() || html.isBlank()) return
+        val existing = repository.getSession(domain)
+        repository.saveSession(
+            sourceId = existing?.sourceId ?: domain,
+            domain = domain,
+            state = VerificationState.COMPLETED,
+            verifiedHtml = html,
+            reasonAr = VerificationState.COMPLETED.labelAr
+        )
+    }
 
     fun inspectHttpResponse(
         sourceId: String,
@@ -542,7 +701,6 @@ class VerificationManager(
             pageTitle = pageTitle
         )
         if (result.isVerificationRequired) {
-            // If a previously completed session hits a challenge again, mark it REQUIRED
             markVerificationRequired(
                 sourceId = sourceId,
                 domain = domain,
@@ -613,10 +771,6 @@ class VerificationManager(
         )
     }
 
-    /**
-     * Completes verification ONLY after verifying that the challenge page has ended
-     * and the loaded HTML is a normal page (when [verifiedHtml] is provided).
-     */
     fun completeVerification(
         sourceId: String,
         domain: String,

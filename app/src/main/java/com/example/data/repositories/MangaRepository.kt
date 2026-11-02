@@ -87,7 +87,11 @@ class MangaRepository(
             domain = source.domain, customId = source.id, customName = source.name,
             customIconText = source.iconText, customIconColorHex = source.iconColorHex
         )
-        return if (result.id != source.id) AliasedMangaSource(result, source.id) else result
+        return if (result.id != source.id || result.name != source.name) {
+            AliasedMangaSource(result, id = source.id, name = source.name)
+        } else {
+            result
+        }
     }
 
     suspend fun runSourceDiagnostics(sourceId: String): SourceDiagnosticReport? {
@@ -141,10 +145,48 @@ class MangaRepository(
     }
 
     /**
-     * Restores any user-added sources from the Room `sources` table into [SourceRegistry] on launch.
-     * Does NOT auto-insert pre-loaded manga websites — the user adds their desired sites manually.
+     * Seeds the 9 specialized built-in sources (`MangaDar`, `Mangalek`, `Azora Manga`, `Mangatek`,
+     * `ProComic`, `Mangastarz`, `Team-X`, `Swat Manga`, `MangaDex`) into Room if not explicitly
+     * deleted by the user, and restores all saved/custom sources into [SourceRegistry] on launch.
      */
     override suspend fun ensureDefaultSourcesRegistered() {
+        val deletedIds = preferences.deletedBuiltInIdsFlow.first()
+        val existingRows = dao.getAllSourcesOnce()
+        val existingById = existingRows.associateBy { it.id }
+        val existingByDomain = existingRows.associateBy { it.domain.lowercase() }
+
+        for (catalogBuiltIn in com.example.sources.BuiltInSourceCatalog.createAll()) {
+            val builtIn = registry.findById(catalogBuiltIn.id) ?: catalogBuiltIn
+            builtIn.attachVerificationManager(verificationManager)
+            if (builtIn.id in deletedIds) continue
+            val alreadySaved = existingById[builtIn.id] ?: existingByDomain[builtIn.domain.lowercase()]
+            if (alreadySaved == null) {
+                val initialStatus = if (builtIn.requiresCloudflareVerification) {
+                    SourceStatus.REQUIRES_VERIFICATION
+                } else {
+                    SourceStatus.SUPPORTED
+                }
+                val entity = SourceEntity(
+                    id = builtIn.id,
+                    name = builtIn.name,
+                    domain = builtIn.domain,
+                    baseUrl = builtIn.baseUrl,
+                    language = "ar",
+                    iconUrl = null,
+                    iconText = builtIn.iconText,
+                    iconColorHex = builtIn.iconColorHex,
+                    isEnabled = true,
+                    isSupported = true,
+                    status = initialStatus.name,
+                    version = 1,
+                    lastCheckedAt = System.currentTimeMillis()
+                )
+                dao.upsertSource(entity)
+                registry.register(builtIn)
+            }
+        }
+        preferences.markDefaultSourcesSeeded()
+
         for (saved in dao.getAllSourcesOnce()) {
             val adapter = adapterFor(saved)
             adapter.attachVerificationManager(verificationManager)
@@ -156,10 +198,15 @@ class MangaRepository(
         val saved = dao.getAllSourcesOnce()
         dao.clearAllSources()
         saved.forEach { source ->
+            preferences.markBuiltInSourceDeleted(source.id)
             dao.deleteSourceConfiguration(source.id)
             registry.unregister(source.id)
         }
-        // Built-ins remain in the registry, but never appear as user-added Room entries.
+        // Re-register built-in connectors in memory for lookup while keeping Room cleared.
+        com.example.sources.BuiltInSourceCatalog.createAll().forEach {
+            it.attachVerificationManager(verificationManager)
+            registry.register(it)
+        }
     }
 
     override suspend fun resolveConnector(sourceIdOrDomain: String): MangaSource? {
@@ -225,23 +272,17 @@ class MangaRepository(
             )
 
         val existing = dao.getSourceByDomain(validationResult.normalizedDomain)
+            ?: dao.getSourceById(connector.id)
         val finalName = customSiteName.trim().ifEmpty { connector.name }
         val sourceId = existing?.id ?: connector.id
+        preferences.unmarkBuiltInSourceDeleted(sourceId)
 
-        // Register in active SourceRegistry with the user's chosen name and ID
-        val registeredAdapter = if (connector.id != sourceId || connector.name != finalName) {
-            registry.findByDomain(validationResult.normalizedDomain) ?: com.example.sources.DynamicSiteSource(
-                domain = validationResult.normalizedDomain,
-                customId = sourceId,
-                customName = finalName,
-                customIconText = connector.iconText,
-                customIconColorHex = connector.iconColorHex
-            )
+        // Never replace a specialized built-in connector with DynamicSiteSource when the user renames it!
+        val retainedAdapter = if (connector.id != sourceId || connector.name != finalName) {
+            AliasedMangaSource(connector, id = sourceId, name = finalName)
         } else {
             connector
         }
-        val retainedAdapter = if (registeredAdapter.id != sourceId)
-            AliasedMangaSource(registeredAdapter, sourceId) else registeredAdapter
         retainedAdapter.attachVerificationManager(verificationManager)
         registry.register(retainedAdapter)
 
@@ -253,8 +294,8 @@ class MangaRepository(
             baseUrl = retainedAdapter.baseUrl,
             language = "ar",
             iconUrl = null,
-            iconText = registeredAdapter.iconText,
-            iconColorHex = registeredAdapter.iconColorHex,
+            iconText = retainedAdapter.iconText,
+            iconColorHex = retainedAdapter.iconColorHex,
             isEnabled = true,
             isSupported = approved,
             status = validationResult.status.name,
@@ -273,12 +314,13 @@ class MangaRepository(
     suspend fun toggleSourceEnabled(sourceId: String, enabled: Boolean) {
         val old = dao.getSourceById(sourceId) ?: return
         val status = if (enabled) {
-            if (old.status == SourceStatus.DISABLED.name) SourceStatus.NEEDS_CONFIGURATION.name else old.status
+            if (old.status == SourceStatus.DISABLED.name) SourceStatus.SUPPORTED.name else old.status
         } else SourceStatus.DISABLED.name
         dao.updateSourceEnabled(sourceId, enabled, status)
     }
 
     suspend fun removeSource(sourceId: String) {
+        preferences.markBuiltInSourceDeleted(sourceId)
         dao.deleteSourceConfiguration(sourceId)
         dao.deleteSource(sourceId)
         registry.unregister(sourceId)
@@ -471,9 +513,12 @@ class MangaRepository(
                 dao.upsertMangaList(entities)
             }
 
+            val allowedSettings = preferences.settingsFlow.first()
+            val pageVisibleItems = entities
+                .filter { allowedSettings.adultContentEnabled || it.contentRating != ContentRating.ADULT_18_PLUS.name }
+                .map { it.toSummary() }
             val allStoredForSource = getMangaBySourceOnce(sourceId)
-            // Do not bypass content filters when the database has no visible works.
-            val finalItems = allStoredForSource
+            val finalItems = if (page > 1) pageVisibleItems else pageVisibleItems.ifEmpty { allStoredForSource }
 
             PipelineLogger.log(
                 stage = PipelineStage.REPOSITORY_UPDATED,
@@ -481,10 +526,10 @@ class MangaRepository(
                 sourceName = connector.name,
                 resultCount = finalItems.size,
                 status = if (finalItems.isNotEmpty()) "UPSERTED" else "EMPTY",
-                details = "newlyUpserted=${entities.size} totalInDb=${allStoredForSource.size}"
+                details = "page=$page newlyUpserted=${entities.size} totalInDb=${allStoredForSource.size}"
             )
 
-            if (finalItems.isEmpty()) {
+            if (finalItems.isEmpty() && page == 1) {
                 if (verificationManager.isVerified(connector.domain)) {
                     verificationManager.markRequiresWebViewFallback(sourceId, connector.domain, true)
                     Result.failure(IllegalStateException("NO_CONTENT_AFTER_VERIFICATION"))
@@ -493,6 +538,11 @@ class MangaRepository(
                 }
             } else {
                 verificationManager.markRequiresWebViewFallback(sourceId, connector.domain, false)
+                dao.getSourceById(sourceId)?.let { src ->
+                    if (src.status != SourceStatus.SUPPORTED.name) {
+                        dao.upsertSource(src.copy(status = SourceStatus.SUPPORTED.name, isSupported = true, lastCheckedAt = System.currentTimeMillis()))
+                    }
+                }
                 Result.success(finalItems)
             }
         } catch (e: VerificationRequiredException) {
@@ -634,26 +684,37 @@ class MangaRepository(
 
         val remotePages = connector?.getPages(chapter.remoteId).orEmpty()
         if (remotePages.isEmpty()) {
+            // If network is unavailable, fall back to any previously saved PageEntities in Room
+            if (cachedPages.isNotEmpty()) {
+                return Result.success(
+                    cachedPages.map {
+                        val existingFile = it.localPath?.let { path -> File(path).takeIf { f -> f.exists() && f.length() > 256L } }
+                        MangaPage(
+                            index = it.pageIndex,
+                            imageUrl = it.imageUrl,
+                            localPath = existingFile?.absolutePath,
+                            chapterTitle = "الفصل ${chapter.title}",
+                            dialoguePreviewAr = it.dialoguePreviewAr
+                        )
+                    }
+                )
+            }
             return Result.failure(IllegalStateException("CHAPTER_EMPTY"))
         }
 
+        // Stream remote pages directly in the reader via Coil (with Referer, User-Agent, and Cookie headers)
+        // while attaching any already-downloaded local file paths without blocking on a full batch download!
         val resolvedPages = remotePages.map { p ->
-            val fileRes = storage.downloadAndSavePage(
+            val candidateLocalFile = storage.getPageFile(
                 sourceId = chapter.sourceId,
                 mangaId = chapter.mangaId,
                 chapterNumber = chapter.chapterNumber,
-                pageIndex = p.index,
-                imageUrl = p.imageUrl,
-                mangaTitle = manga?.title ?: p.chapterTitle,
-                chapterTitle = "الفصل ${chapter.title}",
-                dialogueAr = p.dialoguePreviewAr,
-                refererUrl = connector?.baseUrl
-            )
-            val path = fileRes.getOrNull()?.absolutePath
+                pageIndex = p.index
+            ).takeIf { it.exists() && it.length() > 256L }
             MangaPage(
                 index = p.index,
                 imageUrl = p.imageUrl,
-                localPath = path,
+                localPath = candidateLocalFile?.absolutePath,
                 chapterTitle = "الفصل ${chapter.title}",
                 dialoguePreviewAr = p.dialoguePreviewAr
             )

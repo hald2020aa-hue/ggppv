@@ -20,9 +20,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -60,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -341,6 +345,7 @@ fun SourceCatalogScreen(
     onClearFilters: () -> Unit,
     onChangeGridMode: (GridDisplayMode) -> Unit,
     onRefreshCatalog: (Int) -> Unit,
+    onLoadNextPage: () -> Unit = {},
     onTriggerCloudflareVerify: (String) -> Unit,
     onToggleEmbeddedWebViewFallback: (Boolean) -> Unit = {},
     onVerifiedWebViewHtmlCaptured: (String, String, String) -> Unit = { _, _, _ -> },
@@ -730,6 +735,9 @@ fun SourceCatalogScreen(
                     items = filteredItems,
                     displayMode = gridDisplayMode,
                     refererUrl = source?.baseUrl,
+                    isLoadingNextPage = catalogState.isLoadingNextPage,
+                    canLoadMore = catalogState.canLoadMore && catalogState.searchQuery.isBlank(),
+                    onLoadNextPage = onLoadNextPage,
                     onItemClick = { onOpenManga(it.id) }
                 )
             }
@@ -902,10 +910,25 @@ fun AdaptiveMangaGridOrList(
     items: List<MangaSummary>,
     displayMode: GridDisplayMode,
     refererUrl: String? = null,
+    isLoadingNextPage: Boolean = false,
+    canLoadMore: Boolean = false,
+    onLoadNextPage: () -> Unit = {},
     onItemClick: (MangaSummary) -> Unit
 ) {
     if (displayMode == GridDisplayMode.LIST) {
+        val listState = rememberLazyListState()
+        val shouldLoadMore by remember(items.size, canLoadMore, isLoadingNextPage) {
+            derivedStateOf {
+                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                canLoadMore && !isLoadingNextPage && items.isNotEmpty() && lastVisible >= (items.size - 4).coerceAtLeast(0)
+            }
+        }
+        LaunchedEffect(shouldLoadMore) {
+            if (shouldLoadMore) onLoadNextPage()
+        }
+
         LazyColumn(
+            state = listState,
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxSize()
@@ -917,9 +940,33 @@ fun AdaptiveMangaGridOrList(
                     onClick = { onItemClick(manga) }
                 )
             }
+            if (isLoadingNextPage) {
+                item(key = "loading_more_list") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp)
+                    }
+                }
+            }
         }
     } else {
+        val gridState = rememberLazyGridState()
+        val shouldLoadMore by remember(items.size, canLoadMore, isLoadingNextPage) {
+            derivedStateOf {
+                val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                canLoadMore && !isLoadingNextPage && items.isNotEmpty() && lastVisible >= (items.size - 4).coerceAtLeast(0)
+            }
+        }
+        LaunchedEffect(shouldLoadMore) {
+            if (shouldLoadMore) onLoadNextPage()
+        }
+
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Adaptive(minSize = displayMode.minCellWidthDp.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -934,6 +981,32 @@ fun AdaptiveMangaGridOrList(
                     refererUrl = refererUrl,
                     onClick = { onItemClick(manga) }
                 )
+            }
+            if (isLoadingNextPage) {
+                item(
+                    key = "loading_more_grid",
+                    span = { GridItemSpan(maxLineSpan) }
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "جارٍ تحميل المزيد من الأعمال...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -1104,22 +1177,22 @@ fun MangaListCardItem(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    repeat(5) {
+                if (manga.rating != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             imageVector = Icons.Default.Star,
                             contentDescription = null,
                             tint = StarYellow,
                             modifier = Modifier.size(14.dp)
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "${manga.rating}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "${manga.rating ?: 4.5f}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(

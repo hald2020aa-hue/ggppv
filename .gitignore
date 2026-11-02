@@ -21,6 +21,7 @@ local.properties
 
 # Secrets & Environment Variables (Never commit real keys)
 .env
+!.env.example
 
 # Keystores & Signing Files (Never commit private signing keys)
 *.jks
@@ -28,5 +29,6 @@ local.properties
 debug.keystore
 debug.keystore.base64
 
-# Ensure Gradle Wrapper JAR is not ignored
+# Ensure Gradle Wrapper JAR and bundled fonts are not ignored
 !gradle/wrapper/gradle-wrapper.jar
+!app/src/main/res/font/*.ttf

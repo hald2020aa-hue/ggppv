@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -39,19 +39,19 @@ import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
+import com.example.core.verification.VerificationManager
 import java.io.File
 import java.net.URI
 
 /**
  * Builds an HTTP-header-aware Coil ImageRequest that:
  * - Resolves local file paths or remote HTTPS URLs
- * - Attaches standard mobile browser User-Agent and origin Referer header
- *   so hotlink-protected manga CDNs do not reject cover/page requests with HTTP 403
+ * - Attaches standard mobile browser User-Agent, Cookie, and origin Referer header
+ *   so hotlink-protected / Cloudflare-protected manga CDNs do not reject cover/page requests with HTTP 403
  * - Enables disk and memory caching
  * - Supports bounded retry via retryAttempt key
  */
 object MangaImageRequestBuilder {
-
 
     fun create(
         context: Context,
@@ -67,7 +67,7 @@ object MangaImageRequestBuilder {
             else -> clean
         }
 
-        val computedReferer = refererUrl?.takeIf { it.startsWith("https://") }
+        val computedReferer = refererUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
             ?: extractOriginReferer(clean)
 
         return ImageRequest.Builder(context)
@@ -78,9 +78,13 @@ object MangaImageRequestBuilder {
             .networkCachePolicy(if (retryAttempt > 0) CachePolicy.DISABLED else CachePolicy.ENABLED)
             .apply {
                 if (clean.startsWith("https://") || clean.startsWith("http://")) {
+                    addHeader("User-Agent", VerificationManager.getUserAgent())
                     addHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
                     if (!computedReferer.isNullOrBlank()) {
                         addHeader("Referer", computedReferer)
+                    }
+                    VerificationManager.getCookieHeader(clean)?.let { cookie ->
+                        addHeader("Cookie", cookie)
                     }
                 }
             }
@@ -94,7 +98,7 @@ object MangaImageRequestBuilder {
         crossfade: Boolean = false
     ): ImageRequest {
         val urlStr = (data as? String)?.trim().orEmpty()
-        val computedReferer = refererUrl?.takeIf { it.startsWith("https://") }
+        val computedReferer = refererUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
             ?: extractOriginReferer(urlStr)
         return ImageRequest.Builder(context)
             .data(data)
@@ -104,9 +108,13 @@ object MangaImageRequestBuilder {
             .networkCachePolicy(CachePolicy.ENABLED)
             .apply {
                 if (urlStr.startsWith("https://") || urlStr.startsWith("http://")) {
+                    addHeader("User-Agent", VerificationManager.getUserAgent())
                     addHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
                     if (!computedReferer.isNullOrBlank()) {
                         addHeader("Referer", computedReferer)
+                    }
+                    VerificationManager.getCookieHeader(urlStr)?.let { cookie ->
+                        addHeader("Cookie", cookie)
                     }
                 }
             }
@@ -238,7 +246,7 @@ private fun StylizedCoverFallback(
             verticalArrangement = Arrangement.Center
         ) {
             Icon(
-                imageVector = Icons.Default.MenuBook,
+                imageVector = Icons.AutoMirrored.Filled.MenuBook,
                 contentDescription = null,
                 tint = Color.White.copy(alpha = 0.78f),
                 modifier = Modifier.size(28.dp)

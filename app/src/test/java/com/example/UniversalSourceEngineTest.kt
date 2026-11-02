@@ -121,4 +121,88 @@ class UniversalSourceEngineTest {
             database.close()
         }
     }
+
+    @Test fun builtInSourceCatalogIncludesAllReferenceAndPreservedConnectors() {
+        val sources = com.example.sources.BuiltInSourceCatalog.createAll()
+        val ids = sources.map { it.id }.toSet()
+        assertEquals(
+            setOf(
+                "mangadar",
+                "mangalek",
+                "azora",
+                "mangatek",
+                "procomic",
+                "mangastarz",
+                "teamx",
+                "swatmanga",
+                "mangadex"
+            ),
+            ids
+        )
+    }
+
+    @Test fun cardIsolationPreventsTitleCoverAndLatestChapterContamination() {
+        val mangatek = com.example.sources.MangatekSource()
+        val html = """
+            <div class="box">
+                <div class="bs">
+                    <div class="bsx">
+                        <a href="https://mangatek.com/manga/magic-emperor">
+                            <img src="https://mangatek.com/covers/magic-emperor.jpg" />
+                            <div class="tt">1Magic emperor</div>
+                        </a>
+                        <div class="epxs"><a href="https://mangatek.com/manga/magic-emperor/chapter-1">Magic emperor الفصل 1</a></div>
+                    </div>
+                    <div class="bsx">
+                        <a href="https://mangatek.com/manga/nano-machine">
+                            <img src="https://mangatek.com/covers/nano-machine.jpg" />
+                            <div class="tt">2Nano Machine الفصل 210</div>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        """.trimIndent()
+        val parsed = mangatek.parseCatalog(html, "https://mangatek.com/")
+        assertEquals(2, parsed.size)
+        val first = parsed.first { it.id.contains("magic-emperor") }
+        val second = parsed.first { it.id.contains("nano-machine") }
+
+        assertEquals("Magic emperor", first.title)
+        assertEquals("https://mangatek.com/covers/magic-emperor.jpg", first.coverUrl)
+        assertEquals("Magic emperor الفصل 1", first.latestChapter)
+
+        assertEquals("Nano Machine", second.title)
+        assertEquals("https://mangatek.com/covers/nano-machine.jpg", second.coverUrl)
+        // Must NOT inherit "Magic emperor الفصل 1" from sibling or parent wrapper!
+        assertNull(second.latestChapter)
+    }
+
+    @Test fun statusAndRatingParsersNeverInventFakeDefaults() {
+        val docWithoutMeta = org.jsoup.Jsoup.parse("<html><body><h1>Work Title</h1></body></html>")
+        assertNull(com.example.sources.parseNormalizedMangaStatus(""))
+        assertNull(com.example.sources.parseRatingFromDoc(docWithoutMeta))
+
+        assertEquals("Completed", com.example.sources.parseNormalizedMangaStatus("مكتملة"))
+        assertEquals("Hiatus", com.example.sources.parseNormalizedMangaStatus("متوقفة"))
+        assertEquals("OnGoing", com.example.sources.parseNormalizedMangaStatus("مستمرة"))
+
+        val ratedDoc = org.jsoup.Jsoup.parse(
+            """<div class="post-total-rating"><span class="score">4.85</span></div>"""
+        )
+        assertEquals(4.85f, com.example.sources.parseRatingFromDoc(ratedDoc) ?: 0f, 0.01f)
+    }
+
+    @Test fun localChapterStorageValidatesRealRasterImageMagicBytes() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val storage = com.example.core.storage.LocalChapterStorage(context)
+        val htmlBytes = "<html><body>Cloudflare Challenge</body></html>".toByteArray()
+        assertFalse(storage.isLikelyRasterImageBytes(htmlBytes))
+
+        val pngHeader = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52
+        )
+        assertTrue(storage.isLikelyRasterImageBytes(pngHeader))
+    }
 }
+

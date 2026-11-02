@@ -93,6 +93,8 @@ data class CatalogUiState(
     val sourceId: String = "",
     val items: List<MangaSummary> = emptyList(),
     val isLoading: Boolean = false,
+    val isLoadingNextPage: Boolean = false,
+    val canLoadMore: Boolean = true,
     val searchQuery: String = "",
     val isSearchActive: Boolean = false,
     val selectedGenres: Set<String> = emptySet(),
@@ -125,6 +127,7 @@ data class ReaderUiState(
     val isControlsVisible: Boolean = false,
     val failedPageIndices: Set<Int> = emptySet(),
     val isBookmarked: Boolean = false,
+    val refererUrl: String? = null,
     val errorMessageAr: String? = null
 )
 
@@ -739,6 +742,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     initialCached
                 },
                 isLoading = true,
+                isLoadingNextPage = false,
+                canLoadMore = true,
                 currentPage = page,
                 errorMessageAr = null,
                 requiresCloudflareGate = false,
@@ -832,11 +837,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 else -> {
                     val fetched = res.getOrNull().orEmpty()
-                    val finalItems = if (fetched.isNotEmpty()) fetched else repository.getMangaBySourceOnce(sourceId)
+                    val allStored = repository.getMangaBySourceOnce(sourceId)
+                    val finalItems = (fetched + allStored).distinctBy { it.id }
                     _catalogState.value = _catalogState.value.copy(
                         sourceId = sourceId,
                         items = finalItems,
                         isLoading = false,
+                        isLoadingNextPage = false,
+                        canLoadMore = fetched.size >= 8,
                         requiresCloudflareGate = false,
                         showEmbeddedWebViewFallback = false,
                         verificationState = latestVerState,
@@ -851,6 +859,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         details = "page=$page"
                     )
                 }
+            }
+        }
+    }
+
+    fun loadNextCatalogPage() {
+        val state = _catalogState.value
+        val sourceId = state.sourceId
+        if (sourceId.isBlank() || state.isLoading || state.isLoadingNextPage || !state.canLoadMore || state.requiresCloudflareGate) {
+            return
+        }
+        val nextPage = state.currentPage + 1
+        _catalogState.value = state.copy(isLoadingNextPage = true)
+        viewModelScope.launch {
+            val res = withTimeoutOrNull(18_000L) {
+                repository.refreshSourceCatalog(sourceId, nextPage)
+            }
+            val current = _catalogState.value
+            if (current.sourceId != sourceId) return@launch
+            if (res != null && res.isSuccess) {
+                val newPageItems = res.getOrNull().orEmpty()
+                val merged = (current.items + newPageItems).distinctBy { it.id }
+                val addedNew = merged.size > current.items.size
+                _catalogState.value = current.copy(
+                    items = merged,
+                    currentPage = if (addedNew) nextPage else current.currentPage,
+                    isLoadingNextPage = false,
+                    canLoadMore = addedNew && newPageItems.size >= 6
+                )
+            } else {
+                _catalogState.value = current.copy(
+                    isLoadingNextPage = false,
+                    canLoadMore = false
+                )
             }
         }
     }
@@ -986,17 +1027,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         readerLoadJob?.cancel()
         readerLoadJob = viewModelScope.launch {
+            val chapterEntity = db.mangaDao().getChapterById(chapterId)
+            val connectorBaseUrl = chapterEntity?.sourceId?.let { repository.resolveConnector(it)?.baseUrl }
+            val resolvedReferer = chapterEntity?.remoteId?.takeIf { it.startsWith("http") } ?: connectorBaseUrl
+
             _readerState.value = ReaderUiState(
                 isLoading = true,
-                loadingProgress = 15,
+                loadingProgress = 25,
                 currentPageIndex = initialPage,
-                currentScrollOffset = initialScrollOffset
+                currentScrollOffset = initialScrollOffset,
+                refererUrl = resolvedReferer
             )
-            for (pct in listOf(38, 65, 88)) {
-                delay(70L)
-                _readerState.value = _readerState.value.copy(loadingProgress = pct)
-            }
-            val res = withTimeoutOrNull(10_000L) {
+            val res = withTimeoutOrNull(14_000L) {
                 repository.getReaderPages(chapterId)
             }
             if (res != null && res.isSuccess) {
@@ -1008,13 +1050,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     pages = pages,
                     currentPageIndex = safeInitial,
                     currentScrollOffset = initialScrollOffset.coerceAtLeast(0),
-                    isControlsVisible = false
+                    isControlsVisible = false,
+                    refererUrl = resolvedReferer
                 )
                 saveReaderProgress(mangaId, chapterId, safeInitial, initialScrollOffset.coerceAtLeast(0))
             } else {
                 _readerState.value = ReaderUiState(
                     isLoading = false,
-                    errorMessageAr = "خطأ في التحميل"
+                    refererUrl = resolvedReferer,
+                    errorMessageAr = "تعذّر تحميل صفحات الفصل من المصدر"
                 )
             }
         }

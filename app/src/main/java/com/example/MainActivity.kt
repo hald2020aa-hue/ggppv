@@ -213,6 +213,7 @@ fun MangaReaderAppRoot(vm: MainViewModel) {
                             onClearFilters = vm::clearCatalogFilters,
                             onChangeGridMode = vm::setGridDisplayMode,
                             onRefreshCatalog = { page -> vm.loadSourceCatalog(route.sourceId, page) },
+                            onLoadNextPage = vm::loadNextCatalogPage,
                             onTriggerCloudflareVerify = vm::triggerCatalogCloudflareVerification,
                             onToggleEmbeddedWebViewFallback = vm::toggleEmbeddedWebViewFallback,
                             onVerifiedWebViewHtmlCaptured = vm::onVerifiedWebViewHtmlCaptured,

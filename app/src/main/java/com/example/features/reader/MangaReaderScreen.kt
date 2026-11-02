@@ -30,12 +30,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Comment
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.ScreenRotation
@@ -203,7 +203,8 @@ fun MangaReaderScreen(
                     MangaImageRequestBuilder.build(
                         context = context,
                         data = data,
-                        crossfade = false
+                        crossfade = false,
+                        refererUrl = readerState.refererUrl
                     )
                 )
             }
@@ -309,6 +310,7 @@ fun MangaReaderScreen(
                         ReaderPageItem(
                             page = page,
                             isFailed = isFailed,
+                            refererUrl = readerState.refererUrl,
                             onRetry = { onRetryFailedPage(idx) }
                         )
                     }
@@ -419,6 +421,7 @@ fun MangaReaderScreen(
                         ReaderPageItem(
                             page = page,
                             isFailed = isFailed,
+                            refererUrl = readerState.refererUrl,
                             onRetry = { onRetryFailedPage(pageIdx) }
                         )
                     }
@@ -525,7 +528,7 @@ fun MangaReaderScreen(
                                 modifier = Modifier.testTag("reader_chapter_list_button")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.FormatListBulleted,
+                                    imageVector = Icons.AutoMirrored.Filled.FormatListBulleted,
                                     contentDescription = "قائمة الفصول",
                                     tint = Color.White
                                 )
@@ -804,6 +807,7 @@ fun MangaReaderScreen(
 private fun ReaderPageItem(
     page: MangaPage,
     isFailed: Boolean,
+    refererUrl: String? = null,
     onRetry: () -> Unit
 ) {
     val context = LocalContext.current
@@ -829,11 +833,12 @@ private fun ReaderPageItem(
             }
         }
 
-        val request = remember(modelData) {
+        val request = remember(modelData, refererUrl) {
             MangaImageRequestBuilder.build(
                 context = context,
                 data = modelData,
-                crossfade = false
+                crossfade = false,
+                refererUrl = refererUrl
             )
         }
 
