@@ -231,13 +231,16 @@ jobs:
               content = content.replace("@Config(sdk = [35])", "@Config(sdk = [34])")
               test_file.write_text(content, encoding="utf-8")
 
-          # 7. Normalize gradle.properties for standard Gradle + KSP execution on CI
+          # 7. Normalize gradle.properties for standard Gradle + AndroidX + KSP execution on CI
           gp_path = pathlib.Path("gradle.properties")
-          if gp_path.exists():
-              gp = gp_path.read_text(encoding="utf-8")
-              gp = gp.replace("kotlin.compiler.execution.strategy=in-process", "# kotlin.compiler.execution.strategy=in-process")
-              gp = gp.replace("org.gradle.configuration-cache=true", "org.gradle.configuration-cache=false")
-              gp_path.write_text(gp, encoding="utf-8")
+          gp = gp_path.read_text(encoding="utf-8") if gp_path.exists() else ""
+          gp = gp.replace("kotlin.compiler.execution.strategy=in-process", "# kotlin.compiler.execution.strategy=in-process")
+          gp = gp.replace("org.gradle.configuration-cache=true", "org.gradle.configuration-cache=false")
+          if "android.useAndroidX=true" not in gp:
+              gp += "\nandroid.useAndroidX=true\n"
+          if "android.nonTransitiveRClass=true" not in gp:
+              gp += "\nandroid.nonTransitiveRClass=true\n"
+          gp_path.write_text(gp, encoding="utf-8")
           EOF
 
       - name: Prepare Binary Assets, Font & Debug Keystore
