@@ -66,7 +66,17 @@ jobs:
               txt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.11.1-bin.zip", txt)
               wrapper_props.write_text(txt, encoding="utf-8")
 
-          # 2. Normalize gradle/libs.versions.toml from AI Studio internal cache versions to public Maven versions
+          # 2. Normalize settings.gradle.kts foojay plugin version & repositories for public Maven
+          settings_path = pathlib.Path("settings.gradle.kts")
+          if settings_path.exists():
+              st = settings_path.read_text(encoding="utf-8")
+              st = st.replace(
+                  'id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"',
+                  'id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"'
+              )
+              settings_path.write_text(st, encoding="utf-8")
+
+          # 3. Normalize gradle/libs.versions.toml to a cohesive Kotlin 2.0.21 + AGP 8.7.3 + SDK 35 release train
           toml_path = pathlib.Path("gradle/libs.versions.toml")
           toml = toml_path.read_text(encoding="utf-8")
           replacements = {
@@ -74,13 +84,28 @@ jobs:
               'coreKtx = "1.18.0"': 'coreKtx = "1.15.0"',
               'junitVersion = "1.3.0"': 'junitVersion = "1.2.1"',
               'espressoCore = "3.7.0"': 'espressoCore = "3.6.1"',
-              'kotlin = "2.2.10"': 'kotlin = "2.1.0"',
-              'googleDevtoolsKsp = "2.3.5"': 'googleDevtoolsKsp = "2.1.0-1.0.29"',
+              'activityCompose = "1.10.1"': 'activityCompose = "1.9.3"',
+              'kotlin = "2.2.10"': 'kotlin = "2.0.21"',
+              'googleDevtoolsKsp = "2.3.5"': 'googleDevtoolsKsp = "2.0.21-1.0.28"',
+              'navigationCompose = "2.8.9"': 'navigationCompose = "2.8.5"',
+              'roomRuntime = "2.7.0"': 'roomRuntime = "2.6.1"',
+              'roomKtx = "2.7.0"': 'roomKtx = "2.6.1"',
+              'roomCompiler = "2.7.0"': 'roomCompiler = "2.6.1"',
+              'kotlinxCoroutinesTest = "1.10.2"': 'kotlinxCoroutinesTest = "1.9.0"',
+              'kotlinxCoroutinesAndroid = "1.10.2"': 'kotlinxCoroutinesAndroid = "1.9.0"',
+              'kotlinxCoroutinesCore = "1.10.2"': 'kotlinxCoroutinesCore = "1.9.0"',
+              'accompanistPermissions = "0.37.3"': 'accompanistPermissions = "0.36.0"',
+              'cameraCamera2 = "1.5.0"': 'cameraCamera2 = "1.4.1"',
+              'cameraLifecycle = "1.5.0"': 'cameraLifecycle = "1.4.1"',
+              'cameraView = "1.5.0"': 'cameraView = "1.4.1"',
+              'cameraCore = "1.5.0"': 'cameraCore = "1.4.1"',
+              'datastorePreferences = "1.1.7"': 'datastorePreferences = "1.1.1"',
               'retrofit = "2.12.0"': 'retrofit = "2.11.0"',
               'converterMoshi = "2.12.0"': 'converterMoshi = "2.11.0"',
               'robolectric = "4.16.1"': 'robolectric = "4.14.1"',
               'firebaseBom = "34.17.0"': 'firebaseBom = "33.7.0"',
               'googleServices = "4.5.0"': 'googleServices = "4.4.2"',
+              'credentials = "1.5.0"': 'credentials = "1.3.0"',
           }
           for old, new in replacements.items():
               toml = toml.replace(old, new)
@@ -91,7 +116,7 @@ jobs:
               )
           toml_path.write_text(toml, encoding="utf-8")
 
-          # 3. Normalize root build.gradle.kts for AGP 8.7.3 + kotlin-android
+          # 4. Normalize root build.gradle.kts for AGP 8.7.3 + kotlin-android
           root_gradle = pathlib.Path("build.gradle.kts")
           rg = root_gradle.read_text(encoding="utf-8")
           if "libs.plugins.kotlin.android" not in rg:
@@ -103,7 +128,7 @@ jobs:
               rg = rg.replace("alias(libs.plugins.google.services) apply false", "// alias(libs.plugins.google.services) apply false")
           root_gradle.write_text(rg, encoding="utf-8")
 
-          # 4. Normalize app/build.gradle.kts for public AGP 8.7.3 & SDK 35
+          # 5. Normalize app/build.gradle.kts for public AGP 8.7.3, SDK 35, KSP & JDK 21 Robolectric
           app_gradle = pathlib.Path("app/build.gradle.kts")
           ag = app_gradle.read_text(encoding="utf-8")
           ag = ag.replace(
@@ -131,9 +156,40 @@ jobs:
                   "compileOptions {\n    sourceCompatibility = JavaVersion.VERSION_11\n    targetCompatibility = JavaVersion.VERSION_11\n  }",
                   "compileOptions {\n    sourceCompatibility = JavaVersion.VERSION_11\n    targetCompatibility = JavaVersion.VERSION_11\n  }\n  kotlinOptions {\n    jvmTarget = \"11\"\n  }"
               )
+          ag = ag.replace(
+              '  "ksp"(libs.moshi.kotlin.codegen)',
+              '  // "ksp"(libs.moshi.kotlin.codegen)'
+          )
+          ag = ag.replace(
+              "testOptions { unitTests { isIncludeAndroidResources = true } }",
+              """testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      isReturnDefaultValues = true
+      all {
+        it.jvmArgs(
+          "-Xmx2g",
+          "--add-opens=java.base/java.lang=ALL-UNNAMED",
+          "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+          "--add-opens=java.base/java.io=ALL-UNNAMED",
+          "--add-opens=java.base/java.net=ALL-UNNAMED",
+          "--add-opens=java.base/java.util=ALL-UNNAMED",
+          "--add-opens=java.base/java.text=ALL-UNNAMED",
+          "--add-opens=java.base/java.security=ALL-UNNAMED"
+        )
+      }
+    }
+  }"""
+          )
           app_gradle.write_text(ag, encoding="utf-8")
 
-          # 5. Normalize gradle.properties for standard Gradle + KSP execution on CI
+          # 6. Normalize Robolectric @Config(sdk = [35]) to @Config(sdk = [34]) for Robolectric 4.14.1 on CI
+          for test_file in pathlib.Path("app/src/test").rglob("*.kt"):
+              content = test_file.read_text(encoding="utf-8")
+              content = content.replace("@Config(sdk = [35])", "@Config(sdk = [34])")
+              test_file.write_text(content, encoding="utf-8")
+
+          # 7. Normalize gradle.properties for standard Gradle + KSP execution on CI
           gp_path = pathlib.Path("gradle.properties")
           if gp_path.exists():
               gp = gp_path.read_text(encoding="utf-8")
@@ -220,20 +276,20 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Run Unit Tests
-        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
-
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Verify APK Output Exists
         run: ls -lh app/build/outputs/apk/debug/*.apk
 
       - name: Upload Debug APK Artifact
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: MangaReader-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Run Unit Tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
